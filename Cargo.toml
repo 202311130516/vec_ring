@@ -3,3 +3,19 @@ license = "GPL-3.0-or-later"
 name = "vec_ring"
 version = "0.1.0"
 edition = "2024"
+
+[lib]
+name = "vrng"
+path = "src/lib.rs"
+
+[[bin]]
+name = "example0"
+path = "src/example0.rs"
+required-features = ["example0"]
+
+[dependencies]
+tokio = { version = "1.45.1", features = ["io-std", "io-util", "rt"], optional = true }
+
+[features]
+example0 = ["tokio"]
+tokio = ["dep:tokio"]

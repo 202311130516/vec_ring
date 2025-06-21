@@ -2,7 +2,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-use std::mem::MaybeUninit;
+use std::{mem::{MaybeUninit, transmute}, ptr::NonNull};
+
+const fn dangling_boxed_slice<T>()
+    -> Box<[T]>
+{
+    let ptr = NonNull::slice_from_raw_parts(NonNull::<T>::dangling(), 0);
+    unsafe { transmute(ptr) }
+}
 
 pub struct VecRng<T>
 {
@@ -19,17 +26,60 @@ pub struct VecRng<T>
 }
 impl<T> VecRng<T>
 {
-    pub fn with_capacity(c: usize)
+    const MINCAP: usize =
+    {
+        let siz = size_of::<T>();
+        if siz == 1 { 8 }
+        else if siz <= 1024 { 4 }
+        else { 1 }
+    };
+    pub const fn new()
         -> Self
     {
         Self
         {
-            buffer: unsafe { Box::new_uninit_slice(c).assume_init() },
+            buffer: dangling_boxed_slice(),
             hindex: 0,
             length: 0,
         }
     }
-    const unsafe fn head_assume_op(&mut self, n: isize)
+    pub fn with_capacity(c: usize)
+        -> Self
+    {
+        let mut ret = Self::new();
+        ret.grow(Self::MINCAP.max(c));
+        ret
+    }
+    fn grow(&mut self, to_c: usize)
+    {
+        /* panics if `to_c > isize::MAX` */
+        let mut newbuf = Box::<[T]>::new_uninit_slice(to_c);
+        let (hln, bln) = self.lens();
+        let src = self.buffer.as_mut_ptr();
+        let dst = newbuf.as_mut_ptr();
+        unsafe { src.copy_to_nonoverlapping(dst.add(hln), bln); }
+        unsafe { src.add(self.hindex).copy_to_nonoverlapping(dst, hln); }
+        self.buffer = newbuf;
+        self.hindex = 0;
+    }
+    pub fn reserve(&mut self, addc: usize)
+    {
+        let to_c = addc.checked_add(self.length).unwrap();
+        let ccap = self.buffer.len();
+        if to_c < ccap
+        {
+            return ();
+        }
+        self.grow(Self::MINCAP.max(to_c).max(ccap << 1));
+    }
+    /* SAFETY:
+     * 0 <= length + n <= buffer.len()
+     * all values in the resulting head and back are init
+     *
+     * n > 0: assume the `n` values before head to be properly init.
+     * n < 0: forget the `n` values at the start of head to be init.
+     */
+    pub const unsafe fn head_init_change(&mut self, n: isize)
     {
         self.hindex =
         /* SAFETY (not memory safety):
@@ -39,35 +89,18 @@ impl<T> VecRng<T>
          */
         ((self.hindex as isize - n) % self.buffer.len() as isize)
         as usize;
+        unsafe { self.back_init_change(n); }
+    }
+    /* SAFETY:
+     * 0 <= length + n <= buffer.len()
+     * all values in the resulting head and back are init
+     *
+     * n > 0: assume the `n` values after back to be properly init.
+     * n < 0: forget the `n` values at the end of back to be init.
+     */
+    pub const unsafe fn back_init_change(&mut self, n: isize)
+    {
         self.length = (self.length as isize + n) as usize;
-    }
-    /* SAFETY:
-     * length + n <= buffer.len()
-     * all values in the resulting head and back are init
-     *
-     * assume the `n` values before head to be properly init.
-     */
-    pub const unsafe fn head_assume_init(&mut self, n: usize)
-    {
-        unsafe { self.head_assume_op(n as isize); }
-    }
-    /* SAFETY:
-     * length - n > 0
-     * all values in the resulting head and back are init
-     *
-     * forget to drop the first `n` values in head.
-     */
-    pub const unsafe fn head_forget_init(&mut self, n: usize)
-    {
-        unsafe { self.head_assume_op(-(n as isize)); }
-    }
-    pub const unsafe fn back_assume_init(&mut self, n: usize)
-    {
-        self.length += n;
-    }
-    pub const unsafe fn back_forget_init(&mut self, n: usize)
-    {
-        self.length -= n;
     }
     #[inline] /* desperately needs optimization on repeated calls. */
     pub const fn lens(&self)
@@ -129,14 +162,14 @@ impl<T> Drop for VecRng<T>
 {
     fn drop(&mut self)
     {
-        let (f, b) = self.as_mut();
-        for e in unsafe { &mut *(f as *mut _ as *mut [MaybeUninit<T>]) }
+        let (h, b) = self.as_mut();
+        for e in h
         {
-            unsafe { e.assume_init_drop() }
+            unsafe { (e as *mut T).drop_in_place() }
         }
-        for e in unsafe { &mut *(b as *mut _ as *mut [MaybeUninit<T>]) }
+        for e in b
         {
-            unsafe { e.assume_init_drop() }
+            unsafe { (e as *mut T).drop_in_place() }
         }
     }
 }
