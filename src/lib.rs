@@ -46,10 +46,14 @@ impl<T> VecRng<T>
     pub fn with_capacity(c: usize)
         -> Self
     {
-        let mut ret = Self::new();
-        ret.grow(Self::MINCAP.max(c));
-        ret
+        Self
+        {
+            buffer: Box::<[T]>::new_uninit_slice(Self::MINCAP.max(c)),
+            hindex: 0,
+            length: 0,
+        }
     }
+    #[inline(never)]
     fn grow(&mut self, to_c: usize)
     {
         /* panics if `to_c > isize::MAX` */
@@ -62,6 +66,7 @@ impl<T> VecRng<T>
         self.buffer = newbuf;
         self.hindex = 0;
     }
+    #[inline]
     pub fn reserve(&mut self, addc: usize)
     {
         let to_c = addc.checked_add(self.length).unwrap();
